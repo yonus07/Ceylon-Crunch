@@ -20,9 +20,9 @@ export const OurStory: React.FC = () => {
 
       <div className="relative w-full h-64 sm:h-80 rounded-3xl overflow-hidden border border-[#EADFD0] shadow-sm">
         <img
-          src="/hero-banner.jpg"
+          src="/our-story.jpg"
           alt="Artisanal Ceylon harvest table"
-          className="w-full h-full object-cover"
+          className="w-full h-full object-cover object-center"
         />
       </div>
 
