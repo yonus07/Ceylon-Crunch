@@ -51,7 +51,7 @@ export interface Product {
 }
 
 export const CATEGORIES = [
-  { slug: 'all', name: 'All Provisions', shortName: 'All' },
+  { slug: 'all', name: 'All Products', shortName: 'All' },
   { slug: 'nuts', name: 'Nuts', shortName: 'Nuts' },
   { slug: 'dried-fruits', name: 'Dried Fruits', shortName: 'Dried Fruits' },
   { slug: 'dates', name: 'Dates', shortName: 'Dates' },

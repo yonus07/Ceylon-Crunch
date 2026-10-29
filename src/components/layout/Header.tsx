@@ -142,7 +142,7 @@ export const Header: React.FC = () => {
                       {/* Category Headlines Only - Balanced Grid */}
                       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 lg:gap-4 items-end">
                         {[
-                          { title: 'ALL PROVISIONS', slug: 'all', href: '/shop' },
+                          { title: 'ALL PRODUCTS', slug: 'all', href: '/shop' },
                           { title: 'NUTS', slug: 'nuts', href: '/category/nuts' },
                           { title: 'DRIED FRUITS', slug: 'dried-fruits', href: '/category/dried-fruits' },
                           { title: 'DATES', slug: 'dates', href: '/category/dates' },
@@ -375,7 +375,7 @@ export const Header: React.FC = () => {
                       onClick={() => setIsMenuOpen(false)}
                       className="flex items-center justify-between py-1 hover:text-[#8B5E3C] transition-colors"
                     >
-                      <span>All Provisions</span>
+                      <span>All Products</span>
                       <ArrowRight className="w-3.5 h-3.5 text-[#8B5E3C]" />
                     </Link>
                   </li>
