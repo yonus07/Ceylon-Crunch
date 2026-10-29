@@ -794,7 +794,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           slug: p.slug,
           name: p.name,
           subtitle: p.subtitle || '',
-          category: p.category as any,
+          category: (() => {
+            const raw = String(p.category || 'nuts').toLowerCase();
+            if (raw === 'mixes') return 'nuts';
+            if (raw === 'berries') return 'dried-fruits';
+            return raw;
+          })() as any,
           badge: p.badge || undefined,
           origin: p.origin,
           roastStyle: p.roast_style || undefined,

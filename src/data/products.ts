@@ -21,9 +21,7 @@ export type ProductCategory =
   | 'dried-fruits'
   | 'dates'
   | 'seeds'
-  | 'berries'
   | 'exotic-nuts'
-  | 'mixes'
   | 'spices'
   | 'gifts-hampers';
 
@@ -54,13 +52,10 @@ export interface Product {
 
 export const CATEGORIES = [
   { slug: 'all', name: 'All Provisions', shortName: 'All' },
-  { slug: 'dried-fruits', name: 'Dried Fruits', shortName: 'Dried Fruits' },
-  { slug: 'seeds', name: 'Seeds & Grains', shortName: 'Seeds' },
   { slug: 'nuts', name: 'Nuts', shortName: 'Nuts' },
+  { slug: 'dried-fruits', name: 'Dried Fruits', shortName: 'Dried Fruits' },
   { slug: 'dates', name: 'Dates', shortName: 'Dates' },
-  { slug: 'berries', name: 'Berries', shortName: 'Berries' },
-  { slug: 'exotic-nuts', name: 'Exotic Nuts', shortName: 'Exotic Nuts' },
-  { slug: 'mixes', name: 'Mixes', shortName: 'Mixes' },
+  { slug: 'seeds', name: 'Seeds & Grains', shortName: 'Seeds' },
   { slug: 'spices', name: 'Whole Spices', shortName: 'Whole Spices' },
   { slug: 'gifts-hampers', name: 'Curated Hampers', shortName: 'Hampers' },
 ] as const;
@@ -209,7 +204,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     slug: 'mixed-nuts',
     name: 'Artisan Mixed Nuts',
     subtitle: 'Roasted Cashews, Almonds, Pistachios & Walnuts',
-    category: 'mixes',
+    category: 'nuts',
     badge: 'Popular Pick',
     origin: 'Ceylon Crunch Reserve',
     roastStyle: 'Evenly roasted master blend',
