@@ -368,9 +368,6 @@ export const Header: React.FC = () => {
             <div className="flex flex-col py-4 space-y-6 flex-1">
               {/* Shop Categories */}
               <div>
-                <span className="text-[11px] font-sans font-bold uppercase tracking-wider text-[#8B5E3C] block mb-2.5">
-                  Harvest Categories
-                </span>
                 <ul className="space-y-2 font-serif text-base text-[#1F3D2B]">
                   <li>
                     <Link
