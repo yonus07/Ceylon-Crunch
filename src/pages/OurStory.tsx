@@ -11,7 +11,7 @@ export const OurStory: React.FC = () => {
           About Ceylon Crunch
         </span>
         <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-bold text-[#1B5132] tracking-tight">
-          Good Products. Carefully Chosen.
+          Better Choices Begin Here.
         </h1>
         <p className="font-serif text-base sm:text-lg text-[#8B5E3C] italic max-w-xl mx-auto">
           From Nature to Your Doorstep.
