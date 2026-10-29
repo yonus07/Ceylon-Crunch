@@ -20,12 +20,12 @@ export const Home: React.FC = () => {
     ];
     const picked: typeof products = [];
     for (const slug of desiredSlugs) {
-      const match = products.find((p) => p.slug === slug);
+      const match = products.find((p) => p.slug === slug && p.isActive !== false);
       if (match) picked.push(match);
     }
-    // If any items are missing, fill with featured products
+    // If any items are missing, fill with active featured products
     if (picked.length === 0) {
-      return products.filter((p) => p.isFeatured).slice(0, 6);
+      return products.filter((p) => p.isFeatured && p.isActive !== false).slice(0, 6);
     }
     return picked;
   }, [products]);

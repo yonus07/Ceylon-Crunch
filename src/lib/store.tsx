@@ -11,6 +11,19 @@ import {
   adminUpdateProductImageUrl,
   placeOrderRpc,
   fetchAdminOrders,
+  fetchCustomerOrders,
+  fetchCustomerAddresses,
+  saveCustomerAddress,
+  updateCustomerAddress,
+  deleteCustomerAddress,
+  fetchCustomerWishlist,
+  addCustomerWishlistItem,
+  removeCustomerWishlistItem,
+  fetchCustomerProfile,
+  upsertCustomerProfile,
+  linkCustomerOrderRpc,
+  DbCustomerAddress,
+  DbOrderWithItems,
   adminUpdateOrderStatus,
   adminUpdatePaymentStatus,
   fetchAdminInquiries,
@@ -19,6 +32,7 @@ import {
   saveReviewToSupabase,
   adminCreateProduct,
   adminUpdateProductDetails,
+  adminToggleProductActive,
   adminDeleteProduct,
   adminFetchNewsletter,
   adminToggleNewsletterSubscriber,
@@ -59,6 +73,7 @@ export interface OrderTimelineStep {
 
 export interface Order {
   id: string; // e.g., CC-000123
+  userId?: string;
   createdAt: string;
   customer: {
     name: string;
@@ -99,6 +114,7 @@ export interface ContactInquiry {
 
 export interface SavedAddress {
   id: string;
+  userId?: string;
   label: string; // e.g., 'Home', 'Work', 'Family'
   recipientName: string;
   phone: string;
@@ -194,6 +210,7 @@ interface StoreContextType {
   hideToast: () => void;
 
   // Customer Session
+  customerId: string | null;
   customerEmail: string | null;
   isCustomerLoggedIn: boolean;
   loginCustomer: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
@@ -232,8 +249,10 @@ interface StoreContextType {
       ingredients?: string;
       isFeatured?: boolean;
       images?: string[];
+      isActive?: boolean;
     }
   ) => Promise<{ success: boolean; error?: string }>;
+  toggleProductVisibility: (productId: string, isActive: boolean) => Promise<{ success: boolean; error?: string }>;
   deleteProduct: (productId: string) => Promise<{ success: boolean; error?: string }>;
 
   // Newsletter Subscribers
@@ -270,15 +289,151 @@ export function normalizePhone(raw: string): string {
   return '94' + digits;
 }
 
+const DEFAULT_CUSTOMER_PROFILE: CustomerProfile = {
+  name: '',
+  phone: '',
+  email: '',
+  city: 'Colombo',
+  district: 'Colombo',
+  dietaryPreferences: [],
+  loyaltyTier: 'Ceylon Patron',
+  memberSince: new Date().getFullYear().toString(),
+};
+
+function mapDbOrder(o: DbOrderWithItems): Order {
+  return {
+    id: o.id,
+    userId: o.user_id || undefined,
+    createdAt: o.created_at ? new Date(o.created_at).toLocaleDateString() : 'Recent',
+    customer: {
+      name: o.customer_name,
+      phone: o.customer_phone,
+      email: o.customer_email || undefined,
+    },
+    shippingAddress: {
+      street: o.shipping_street,
+      city: o.shipping_city,
+      district: o.shipping_district,
+      postalCode: o.shipping_postal || undefined,
+      landmark: o.landmark || undefined,
+    },
+    paymentMethod: o.payment_method,
+    paymentStatus: o.payment_status,
+    paymentSlipUrl: o.payment_slip_url || undefined,
+    orderNotes: o.order_notes || undefined,
+    giftNote: o.gift_note || undefined,
+    subtotal: Number(o.subtotal),
+    deliveryFee: Number(o.delivery_fee),
+    total: Number(o.total),
+    status: o.status,
+    waybill: o.waybill || '',
+    estimatedArrival: o.estimated_arrival || '1-2 business days',
+    items: (o.items || []).map((item) => ({
+      productId: item.product_id || '',
+      variantId: '',
+      productName: item.product_name,
+      variantWeight: item.variant_weight,
+      price: Number(item.price),
+      quantity: item.quantity,
+      image: item.image || '',
+      slug: '',
+    })),
+    timeline: [
+      {
+        status: 'placed',
+        title: 'Order Placed',
+        timestamp: o.created_at ? new Date(o.created_at).toLocaleDateString() : 'Recorded',
+        description: 'Web checkout verified & tokenized',
+        completed: true,
+      },
+      {
+        status: 'confirmed',
+        title: 'Order Confirmed',
+        timestamp: 'Status check',
+        description: o.payment_method === 'cod' ? 'Payment due on delivery' : 'Awaiting payment verification',
+        completed: ['confirmed', 'packed', 'dispatched', 'delivered'].includes(o.status),
+      },
+      {
+        status: 'packed',
+        title: 'Small-Batch Packed',
+        timestamp: 'Fulfillment queue',
+        description: 'Aroma-sealed foil packaging',
+        completed: ['packed', 'dispatched', 'delivered'].includes(o.status),
+      },
+      {
+        status: 'dispatched',
+        title: 'Dispatched & In Transit',
+        timestamp: 'Courier handover',
+        description: 'Pronto Tracked Courier',
+        completed: ['dispatched', 'delivered'].includes(o.status),
+      },
+      {
+        status: 'delivered',
+        title: 'Delivered',
+        timestamp: 'Final destination',
+        description: 'Recipient signature',
+        completed: o.status === 'delivered',
+      },
+    ],
+  };
+}
+
+function mapDbAddress(a: DbCustomerAddress): SavedAddress {
+  return {
+    id: a.id,
+    userId: a.user_id,
+    label: a.label,
+    recipientName: a.recipient_name,
+    phone: a.phone,
+    street: a.street,
+    landmark: a.landmark || undefined,
+    city: a.city,
+    district: a.district,
+    postalCode: a.postal_code || undefined,
+    isDefault: a.is_default,
+  };
+}
+
+function getInitialCustomerSession(): { uid: string | null; email: string | null } {
+  try {
+    const cachedUid = localStorage.getItem('ceylon_crunch_active_user_id');
+    const cachedEmail = localStorage.getItem('ceylon_crunch_active_user_email');
+    if (cachedUid) {
+      return { uid: cachedUid, email: cachedEmail || null };
+    }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('sb-') && key.endsWith('-auth-token')) {
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const u = parsed?.user;
+          if (u?.id) {
+            return { uid: u.id, email: u.email || null };
+          }
+        }
+      }
+    }
+  } catch {}
+  return { uid: null, email: null };
+}
+
 export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Purge any stale legacy localStorage product caches so Supabase remains single source of truth
+  // Purge any stale legacy unpartitioned localStorage caches so customer data privacy is strictly protected
   try {
     localStorage.removeItem('ceylon_crunch_products_v5');
     localStorage.removeItem('ceylon_crunch_products_v4');
     localStorage.removeItem('ceylon_crunch_products_v3');
     localStorage.removeItem('ceylon_crunch_products_v2');
     localStorage.removeItem('ceylon_crunch_products');
+    localStorage.removeItem('ceylon_crunch_orders');
+    localStorage.removeItem('ceylon_crunch_saved_addresses');
+    localStorage.removeItem('ceylon_crunch_wishlist');
+    localStorage.removeItem('ceylon_crunch_patron_profile');
   } catch {}
+
+  // Synchronous session derivation for flicker-free data persistence across page refreshes
+  const initialSession = useMemo(() => getInitialCustomerSession(), []);
 
   // Products state (initial skeleton from INITIAL_PRODUCTS, immediately hydrated from Supabase)
   const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
@@ -302,20 +457,54 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   });
 
-  // Orders
+  // Customer Session Identity
+  const [customerId, setCustomerId] = useState<string | null>(initialSession.uid);
+  const [customerEmail, setCustomerEmail] = useState<string | null>(initialSession.email);
+
+  // Customer Orders, Addresses, Wishlist, and Profile hydrated instantly from user-partitioned storage
   const [orders, setOrders] = useState<Order[]>(() => {
-    try {
-      const saved = localStorage.getItem('ceylon_crunch_orders');
-      if (saved) {
-        const parsed: Order[] = JSON.parse(saved);
-        return parsed.filter(
-          (o) => !['CC-000123', 'CC-000124', 'CC-000120'].includes(o.id)
-        );
-      }
-      return [];
-    } catch {
-      return [];
+    if (initialSession.uid) {
+      try {
+        const saved = localStorage.getItem(`ceylon_crunch_orders_${initialSession.uid}`);
+        if (saved) return JSON.parse(saved);
+      } catch {}
+    } else {
+      try {
+        const saved = localStorage.getItem('ceylon_crunch_guest_orders');
+        if (saved) return JSON.parse(saved);
+      } catch {}
     }
+    return [];
+  });
+
+  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>(() => {
+    if (initialSession.uid) {
+      try {
+        const saved = localStorage.getItem(`ceylon_crunch_saved_addresses_${initialSession.uid}`);
+        if (saved) return JSON.parse(saved);
+      } catch {}
+    }
+    return [];
+  });
+
+  const [wishlist, setWishlist] = useState<string[]>(() => {
+    if (initialSession.uid) {
+      try {
+        const saved = localStorage.getItem(`ceylon_crunch_wishlist_${initialSession.uid}`);
+        if (saved) return JSON.parse(saved);
+      } catch {}
+    }
+    return [];
+  });
+
+  const [patronProfile, setPatronProfile] = useState<CustomerProfile>(() => {
+    if (initialSession.uid) {
+      try {
+        const saved = localStorage.getItem(`ceylon_crunch_patron_profile_${initialSession.uid}`);
+        if (saved) return JSON.parse(saved);
+      } catch {}
+    }
+    return DEFAULT_CUSTOMER_PROFILE;
   });
 
   // Reviews
@@ -355,47 +544,129 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Toast
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
-  // Patron Profile State
-  const [patronProfile, setPatronProfile] = useState<CustomerProfile>(() => {
-    try {
-      const saved = localStorage.getItem('ceylon_crunch_patron_profile');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      name: '',
-      phone: '',
-      email: '',
-      city: 'Colombo',
-      district: 'Colombo',
-      dietaryPreferences: [],
-      loyaltyTier: 'Ceylon Patron',
-      memberSince: new Date().getFullYear().toString(),
-    };
-  });
-
-  // Saved Addresses State
-  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>(() => {
-    try {
-      const saved = localStorage.getItem('ceylon_crunch_saved_addresses');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return [];
-  });
-
-  // Wishlist State (list of product IDs)
-  const [wishlist, setWishlist] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('ceylon_crunch_wishlist');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return [];
-  });
-
   // Admin session authenticated through Supabase Auth & public.admins table
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [isAdminLoading, setIsAdminLoading] = useState<boolean>(true);
   const [adminEmail, setAdminEmail] = useState<string | null>(null);
-  const [customerEmail, setCustomerEmail] = useState<string | null>(null);
+
+  // Clear customer data when signing out or unauthenticated
+  const clearCustomerData = () => {
+    setCustomerId(null);
+    setCustomerEmail(null);
+    setOrders([]);
+    setSavedAddresses([]);
+    setWishlist([]);
+    setPatronProfile(DEFAULT_CUSTOMER_PROFILE);
+    try {
+      localStorage.removeItem('ceylon_crunch_active_user_id');
+      localStorage.removeItem('ceylon_crunch_active_user_email');
+      localStorage.removeItem('ceylon_crunch_guest_orders');
+    } catch {}
+  };
+
+  // Synchronize authenticated customer's own orders, addresses, wishlist, and profile from Supabase
+  const syncCustomerData = async (uid: string, userObj?: any) => {
+    // 1. Instant local hydration from user-partitioned storage cache
+    try {
+      const cachedOrders = localStorage.getItem(`ceylon_crunch_orders_${uid}`);
+      if (cachedOrders) setOrders(JSON.parse(cachedOrders));
+
+      const cachedAddresses = localStorage.getItem(`ceylon_crunch_saved_addresses_${uid}`);
+      if (cachedAddresses) setSavedAddresses(JSON.parse(cachedAddresses));
+
+      const cachedWishlist = localStorage.getItem(`ceylon_crunch_wishlist_${uid}`);
+      if (cachedWishlist) setWishlist(JSON.parse(cachedWishlist));
+
+      const cachedProfile = localStorage.getItem(`ceylon_crunch_patron_profile_${uid}`);
+      if (cachedProfile) setPatronProfile(JSON.parse(cachedProfile));
+    } catch {}
+
+    if (!isSupabaseConfigured || !supabase) return;
+
+    // 2. Authoritative sync with Supabase (backend RLS ensures only this customer's rows are returned)
+    try {
+      // 2a. Orders: user-scoped query merged with any locally linked orders
+      fetchCustomerOrders(uid).then((dbOrders) => {
+        if (dbOrders) {
+          const mapped = dbOrders.map(mapDbOrder);
+          setOrders((prev) => {
+            const dbIds = new Set(mapped.map((o) => o.id));
+            const locallyLinked = prev.filter(
+              (o) => !dbIds.has(o.id) && (o.userId === uid || (customerEmail && o.customer?.email === customerEmail))
+            );
+            const merged = [...mapped, ...locallyLinked];
+            try {
+              localStorage.setItem(`ceylon_crunch_orders_${uid}`, JSON.stringify(merged));
+            } catch {}
+            return merged;
+          });
+        }
+      });
+
+      // 2b. Addresses: user-scoped
+      fetchCustomerAddresses(uid).then((dbAddrs) => {
+        if (dbAddrs) {
+          const mapped = dbAddrs.map(mapDbAddress);
+          setSavedAddresses(mapped);
+          try {
+            localStorage.setItem(`ceylon_crunch_saved_addresses_${uid}`, JSON.stringify(mapped));
+          } catch {}
+        }
+      });
+
+      // 2c. Wishlist: user-scoped
+      fetchCustomerWishlist(uid).then((dbWish) => {
+        if (dbWish) {
+          setWishlist(dbWish);
+          try {
+            localStorage.setItem(`ceylon_crunch_wishlist_${uid}`, JSON.stringify(dbWish));
+          } catch {}
+        }
+      });
+
+      // 2d. Profile
+      fetchCustomerProfile().then((dbProfile) => {
+        if (dbProfile) {
+          setPatronProfile((prev) => {
+            const updated: CustomerProfile = {
+              ...prev,
+              name: dbProfile.name || prev.name,
+              phone: dbProfile.phone || prev.phone,
+              email: dbProfile.email || prev.email,
+              city: dbProfile.city || prev.city,
+              district: dbProfile.district || prev.district,
+              dietaryPreferences: dbProfile.dietary_preferences || prev.dietaryPreferences,
+              loyaltyTier: (dbProfile.loyalty_tier as any) || prev.loyaltyTier,
+            };
+            try {
+              localStorage.setItem(`ceylon_crunch_patron_profile_${uid}`, JSON.stringify(updated));
+            } catch {}
+            return updated;
+          });
+        } else if (userObj) {
+          const meta = userObj.user_metadata || {};
+          const metaName = meta.full_name || meta.name;
+          const metaPhone = meta.phone;
+          if (metaName || metaPhone || userObj.email) {
+            setPatronProfile((prev) => {
+              const updated = {
+                ...prev,
+                email: userObj.email || prev.email,
+                ...(metaName ? { name: metaName } : {}),
+                ...(metaPhone ? { phone: metaPhone } : {}),
+              };
+              try {
+                localStorage.setItem(`ceylon_crunch_patron_profile_${uid}`, JSON.stringify(updated));
+              } catch {}
+              return updated;
+            });
+          }
+        }
+      });
+    } catch (err) {
+      console.warn('Error syncing customer data:', err);
+    }
+  };
 
   useEffect(() => {
     try {
@@ -404,9 +675,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const client = supabase;
     if (!client) {
+      clearCustomerData();
       setIsAdmin(false);
       setIsAdminLoading(false);
-      setCustomerEmail(null);
       return;
     }
 
@@ -416,11 +687,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     client.auth.getSession().then(async ({ data: { session } }) => {
       if (!isMounted) return;
       if (session?.user) {
+        const uid = session.user.id;
+        setCustomerId(uid);
         setCustomerEmail(session.user.email || null);
+        try {
+          localStorage.setItem('ceylon_crunch_active_user_id', uid);
+          if (session.user.email) {
+            localStorage.setItem('ceylon_crunch_active_user_email', session.user.email);
+          }
+        } catch {}
+
         const { data: adminRow } = await client
           .from('admins')
           .select('role')
-          .eq('user_id', session.user.id)
+          .eq('user_id', uid)
           .maybeSingle();
 
         if (isMounted) {
@@ -428,26 +708,45 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setIsAdmin(valid);
           setAdminEmail(valid ? session.user.email || null : null);
           setIsAdminLoading(false);
+          // Sync customer's private data
+          syncCustomerData(uid, session.user);
+          // If admin, also load store-wide orders for the admin management dashboard
+          if (valid) {
+            fetchAdminOrders().then((adminDbOrders) => {
+              if (adminDbOrders && isMounted) {
+                setOrders(adminDbOrders.map(mapDbOrder));
+              }
+            });
+          }
         }
       } else {
         if (isMounted) {
+          clearCustomerData();
           setIsAdmin(false);
           setAdminEmail(null);
-          setCustomerEmail(null);
           setIsAdminLoading(false);
         }
       }
     });
 
-    // Listen to session changes / expiry
+    // Listen to session changes / expiry / sign-in / sign-out
     const { data: { subscription } } = client.auth.onAuthStateChange(async (_event, session) => {
       if (!isMounted) return;
       if (session?.user) {
+        const uid = session.user.id;
+        setCustomerId(uid);
         setCustomerEmail(session.user.email || null);
+        try {
+          localStorage.setItem('ceylon_crunch_active_user_id', uid);
+          if (session.user.email) {
+            localStorage.setItem('ceylon_crunch_active_user_email', session.user.email);
+          }
+        } catch {}
+
         const { data: adminRow } = await client
           .from('admins')
           .select('role')
-          .eq('user_id', session.user.id)
+          .eq('user_id', uid)
           .maybeSingle();
 
         if (isMounted) {
@@ -455,12 +754,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setIsAdmin(valid);
           setAdminEmail(valid ? session.user.email || null : null);
           setIsAdminLoading(false);
+          // Sync customer's private data
+          syncCustomerData(uid, session.user);
+          if (valid) {
+            fetchAdminOrders().then((adminDbOrders) => {
+              if (adminDbOrders && isMounted) {
+                setOrders(adminDbOrders.map(mapDbOrder));
+              }
+            });
+          }
         }
       } else {
         if (isMounted) {
+          clearCustomerData();
           setIsAdmin(false);
           setAdminEmail(null);
-          setCustomerEmail(null);
           setIsAdminLoading(false);
         }
       }
@@ -508,9 +816,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           })),
           pairsWithIds: [],
           isFeatured: p.is_featured,
+          isActive: p.is_active !== false,
         }));
         const dbSlugs = new Set(mappedProducts.map((p) => p.slug));
-        const extraInitial = INITIAL_PRODUCTS.filter((p) => !dbSlugs.has(p.slug));
+        const extraInitial = INITIAL_PRODUCTS.filter((p) => !dbSlugs.has(p.slug)).map((p) => ({
+          ...p,
+          isActive: p.isActive !== false,
+        }));
         setProducts([...extraInitial, ...mappedProducts]);
       }
     } catch (err) {
@@ -520,87 +832,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  // Live Refresh Orders from Supabase (for Admin)
+  // Live Refresh Orders from Supabase (for Admin & Customer)
   const refreshOrders = async () => {
     if (!isSupabaseConfigured || !supabase) return;
     try {
-      const dbOrders = await fetchAdminOrders();
-      if (dbOrders) {
-        const mapped: Order[] = dbOrders.map((o) => ({
-          id: o.id,
-          createdAt: o.created_at ? new Date(o.created_at).toLocaleDateString() : 'Recent',
-          customer: {
-            name: o.customer_name,
-            phone: o.customer_phone,
-            email: o.customer_email || undefined,
-          },
-          shippingAddress: {
-            street: o.shipping_street,
-            city: o.shipping_city,
-            district: o.shipping_district,
-            postalCode: o.shipping_postal || undefined,
-            landmark: o.landmark || undefined,
-          },
-          paymentMethod: o.payment_method,
-          paymentStatus: o.payment_status,
-          paymentSlipUrl: o.payment_slip_url || undefined,
-          orderNotes: o.order_notes || undefined,
-          giftNote: o.gift_note || undefined,
-          subtotal: Number(o.subtotal),
-          deliveryFee: Number(o.delivery_fee),
-          total: Number(o.total),
-          status: o.status,
-          waybill: o.waybill || '',
-          estimatedArrival: o.estimated_arrival || '1-2 business days',
-          items: (o.items || []).map((item) => ({
-            productId: item.product_id || '',
-            variantId: '',
-            productName: item.product_name,
-            variantWeight: item.variant_weight,
-            price: Number(item.price),
-            quantity: item.quantity,
-            image: item.image || '',
-            slug: '',
-          })),
-          timeline: [
-            {
-              status: 'placed',
-              title: 'Order Placed',
-              timestamp: o.created_at ? new Date(o.created_at).toLocaleDateString() : 'Recorded',
-              description: 'Web checkout verified & tokenized',
-              completed: true,
-            },
-            {
-              status: 'confirmed',
-              title: 'Order Confirmed',
-              timestamp: 'Status check',
-              description: o.payment_method === 'cod' ? 'Payment due on delivery' : 'Awaiting payment verification',
-              completed: ['confirmed', 'packed', 'dispatched', 'delivered'].includes(o.status),
-            },
-            {
-              status: 'packed',
-              title: 'Small-Batch Packed',
-              timestamp: 'Fulfillment queue',
-              description: 'Aroma-sealed foil packaging',
-              completed: ['packed', 'dispatched', 'delivered'].includes(o.status),
-            },
-            {
-              status: 'dispatched',
-              title: 'Dispatched & In Transit',
-              timestamp: 'Courier handover',
-              description: 'Pronto Tracked Courier',
-              completed: ['dispatched', 'delivered'].includes(o.status),
-            },
-            {
-              status: 'delivered',
-              title: 'Delivered',
-              timestamp: 'Final destination',
-              description: 'Recipient signature',
-              completed: o.status === 'delivered',
-            },
-          ],
-        }));
-        setOrders(mapped);
+      if (isAdmin) {
+        const dbOrders = await fetchAdminOrders();
+        if (dbOrders) {
+          setOrders(dbOrders.map(mapDbOrder));
+        }
+      } else if (customerId) {
+        const dbOrders = await fetchCustomerOrders(customerId);
+        if (dbOrders) {
+          const mapped = dbOrders.map(mapDbOrder);
+          setOrders(mapped);
+          try {
+            localStorage.setItem(`ceylon_crunch_orders_${customerId}`, JSON.stringify(mapped));
+          } catch {}
+        }
       }
     } catch (err) {
       console.warn('Error refreshing orders from Supabase:', err);
@@ -659,7 +908,40 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders' },
         () => {
-          if (isAdmin) refreshOrders();
+          if (isAdmin || customerId) refreshOrders();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'customer_addresses' },
+        () => {
+          if (customerId) {
+            fetchCustomerAddresses(customerId).then((dbAddrs) => {
+              if (dbAddrs) {
+                const mapped = dbAddrs.map(mapDbAddress);
+                setSavedAddresses(mapped);
+                try {
+                  localStorage.setItem(`ceylon_crunch_saved_addresses_${customerId}`, JSON.stringify(mapped));
+                } catch {}
+              }
+            });
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'customer_wishlist' },
+        () => {
+          if (customerId) {
+            fetchCustomerWishlist(customerId).then((dbWish) => {
+              if (dbWish) {
+                setWishlist(dbWish);
+                try {
+                  localStorage.setItem(`ceylon_crunch_wishlist_${customerId}`, JSON.stringify(dbWish));
+                } catch {}
+              }
+            });
+          }
         }
       )
       .subscribe();
@@ -669,6 +951,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (isAdmin) {
         refreshOrders();
         refreshInquiries();
+      } else if (customerId) {
+        refreshOrders();
       }
     };
 
@@ -683,7 +967,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const intervalId = setInterval(() => {
       refreshProducts();
-      if (isAdmin) {
+      if (isAdmin || customerId) {
         refreshOrders();
       }
     }, 30000);
@@ -694,7 +978,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       window.removeEventListener('visibilitychange', handleVisibility);
       clearInterval(intervalId);
     };
-  }, [isAdmin]);
+  }, [isAdmin, customerId]);
 
   // When admin logs in, load orders and inquiries from Supabase
   useEffect(() => {
@@ -759,12 +1043,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [giftNote]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('ceylon_crunch_orders', JSON.stringify(orders));
-    } catch (e) {
-      console.error(e);
+    if (customerId && !isAdmin) {
+      try {
+        localStorage.setItem(`ceylon_crunch_orders_${customerId}`, JSON.stringify(orders));
+      } catch (e) {
+        console.error(e);
+      }
+    } else if (!customerId && !isAdmin) {
+      try {
+        localStorage.setItem('ceylon_crunch_guest_orders', JSON.stringify(orders));
+      } catch (e) {
+        console.error(e);
+      }
     }
-  }, [orders]);
+  }, [orders, customerId, isAdmin]);
 
   useEffect(() => {
     try {
@@ -991,7 +1283,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const getProductBySlug = (slug: string) => {
-    return products.find((p) => p.slug === slug);
+    return products.find((p) => p.slug === slug && (isAdmin || p.isActive !== false));
   };
 
   // Cart operations
@@ -1093,6 +1385,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     orderData: Omit<Order, 'id' | 'createdAt' | 'waybill' | 'timeline' | 'estimatedArrival' | 'status'>
   ): Promise<{ success: boolean; order?: Order; error?: string }> => {
     if (isSupabaseConfigured) {
+      let effectiveUserId = customerId;
+      if (!effectiveUserId && supabase) {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user?.id) {
+            effectiveUserId = user.id;
+          }
+        } catch {}
+      }
+
       const rpcItems = orderData.items.map((i) => ({
         variant_id: i.variantId,
         quantity: i.quantity,
@@ -1111,6 +1413,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         items: rpcItems,
         order_notes: orderData.orderNotes,
         gift_note: orderData.giftNote,
+        user_id: effectiveUserId || undefined,
       });
 
       if (!rpcRes.success || !rpcRes.order_id) {
@@ -1128,6 +1431,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const newOrder: Order = {
         ...orderData,
         id: orderId,
+        userId: effectiveUserId || undefined,
         createdAt: formattedDate,
         status: (rpcRes.status as OrderStatus) || 'placed',
         subtotal: rpcRes.subtotal ?? orderData.subtotal,
@@ -1176,9 +1480,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       setOrders((prev) => {
         const next = [newOrder, ...prev];
-        try {
-          localStorage.setItem('ceylon_crunch_orders', JSON.stringify(next));
-        } catch {}
+        if (effectiveUserId) {
+          try {
+            localStorage.setItem(`ceylon_crunch_orders_${effectiveUserId}`, JSON.stringify(next));
+          } catch {}
+        } else {
+          try {
+            localStorage.setItem('ceylon_crunch_guest_orders', JSON.stringify(next));
+          } catch {}
+        }
         return next;
       });
 
@@ -1506,6 +1816,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       ingredients?: string;
       isFeatured?: boolean;
       images?: string[];
+      isActive?: boolean;
     }
   ): Promise<{ success: boolean; error?: string }> => {
     // Optimistic local state update
@@ -1524,6 +1835,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ingredients: updates.ingredients !== undefined ? updates.ingredients : p.ingredients,
           isFeatured: updates.isFeatured !== undefined ? updates.isFeatured : p.isFeatured,
           images: updates.images !== undefined ? updates.images : p.images,
+          isActive: updates.isActive !== undefined ? updates.isActive : p.isActive,
         };
       })
     );
@@ -1540,6 +1852,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ingredients: updates.ingredients,
         is_featured: updates.isFeatured,
         images: updates.images,
+        is_active: updates.isActive,
       });
       if (!res.success) {
         await refreshProducts();
@@ -1547,6 +1860,32 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     }
 
+    return { success: true };
+  };
+
+  const toggleProductVisibility = async (
+    productId: string,
+    isActive: boolean
+  ): Promise<{ success: boolean; error?: string }> => {
+    // Optimistic local state update
+    setProducts((prev) =>
+      prev.map((p) => (p.id === productId ? { ...p, isActive } : p))
+    );
+
+    if (isSupabaseConfigured) {
+      const res = await adminToggleProductActive(productId, isActive);
+      if (!res.success) {
+        showToast(`Visibility update failed: ${res.error}`);
+        await refreshProducts();
+        return { success: false, error: res.error };
+      }
+    }
+
+    showToast(
+      isActive
+        ? 'Product is now visible on storefront.'
+        : 'Product is now hidden from storefront.'
+    );
     return { success: true };
   };
 
@@ -1610,9 +1949,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('SignOut error:', err);
       }
     }
+    clearCustomerData();
     setIsAdmin(false);
     setAdminEmail(null);
-    setCustomerEmail(null);
   };
 
   // Customer Login, Signup, and Logout
@@ -1632,15 +1971,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return { success: false, error: error.message };
       }
       if (data.user) {
+        const uid = data.user.id;
+        setCustomerId(uid);
         setCustomerEmail(data.user.email || null);
-        const meta = data.user.user_metadata || {};
-        const metaName = meta.full_name || meta.name;
-        const metaPhone = meta.phone;
-        updatePatronProfile({
-          email: data.user.email || undefined,
-          ...(metaName ? { name: metaName } : {}),
-          ...(metaPhone ? { phone: metaPhone } : {}),
-        });
+        try {
+          localStorage.setItem('ceylon_crunch_active_user_id', uid);
+          if (data.user.email) {
+            localStorage.setItem('ceylon_crunch_active_user_email', data.user.email);
+          }
+        } catch {}
+
+        await syncCustomerData(uid, data.user);
         return { success: true };
       }
       return { success: false, error: 'No user data received.' };
@@ -1673,12 +2014,25 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return { success: false, error: error.message };
       }
       if (data.user) {
+        const uid = data.user.id;
+        setCustomerId(uid);
         setCustomerEmail(data.user.email || null);
-        updatePatronProfile({
-          email: data.user.email || undefined,
-          ...(name?.trim() ? { name: name.trim() } : {}),
-          ...(phone?.trim() ? { phone: phone.trim() } : {}),
-        });
+        try {
+          localStorage.setItem('ceylon_crunch_active_user_id', uid);
+          if (data.user.email) {
+            localStorage.setItem('ceylon_crunch_active_user_email', data.user.email);
+          }
+        } catch {}
+
+        if (name?.trim() || phone?.trim() || data.user.email) {
+          updatePatronProfile({
+            email: data.user.email || undefined,
+            ...(name?.trim() ? { name: name.trim() } : {}),
+            ...(phone?.trim() ? { phone: phone.trim() } : {}),
+          });
+        }
+
+        await syncCustomerData(uid, data.user);
         return { success: true };
       }
       return { success: false, error: 'Registration failed.' };
@@ -1695,7 +2049,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('Customer signOut error:', err);
       }
     }
-    setCustomerEmail(null);
+    clearCustomerData();
     setIsAdmin(false);
     setAdminEmail(null);
   };
@@ -1704,17 +2058,33 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const updatePatronProfile = (data: Partial<CustomerProfile>) => {
     setPatronProfile((prev) => {
       const updated = { ...prev, ...data };
-      try {
-        localStorage.setItem('ceylon_crunch_patron_profile', JSON.stringify(updated));
-      } catch {}
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_patron_profile_${customerId}`, JSON.stringify(updated));
+        } catch {}
+      }
       return updated;
     });
+
+    if (isSupabaseConfigured && customerId) {
+      upsertCustomerProfile({
+        name: data.name,
+        phone: data.phone,
+        email: data.email,
+        city: data.city,
+        district: data.district,
+        dietary_preferences: data.dietaryPreferences,
+        loyalty_tier: data.loyaltyTier,
+      }).catch(console.warn);
+    }
   };
 
   const addSavedAddress = (addressData: Omit<SavedAddress, 'id'>): SavedAddress => {
+    const tempId = `addr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const newAddress: SavedAddress = {
       ...addressData,
-      id: `addr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      id: tempId,
+      userId: customerId || undefined,
       isDefault: savedAddresses.length === 0 ? true : addressData.isDefault,
     };
     setSavedAddresses((prev) => {
@@ -1723,11 +2093,39 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         updated = prev.map((a) => ({ ...a, isDefault: false }));
       }
       const finalAddresses = [newAddress, ...updated];
-      try {
-        localStorage.setItem('ceylon_crunch_saved_addresses', JSON.stringify(finalAddresses));
-      } catch {}
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_saved_addresses_${customerId}`, JSON.stringify(finalAddresses));
+        } catch {}
+      }
       return finalAddresses;
     });
+
+    if (isSupabaseConfigured && customerId) {
+      saveCustomerAddress({
+        user_id: customerId,
+        label: newAddress.label,
+        recipient_name: newAddress.recipientName,
+        phone: newAddress.phone,
+        street: newAddress.street,
+        landmark: newAddress.landmark || null,
+        city: newAddress.city,
+        district: newAddress.district,
+        postal_code: newAddress.postalCode || null,
+        is_default: newAddress.isDefault,
+      }).then((res) => {
+        if (res.success && res.data) {
+          setSavedAddresses((prev) => {
+            const updated = prev.map((a) => (a.id === tempId ? { ...a, id: res.data!.id } : a));
+            try {
+              localStorage.setItem(`ceylon_crunch_saved_addresses_${customerId}`, JSON.stringify(updated));
+            } catch {}
+            return updated;
+          });
+        }
+      }).catch(console.warn);
+    }
+
     return newAddress;
   };
 
@@ -1737,11 +2135,27 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (addressData.isDefault) {
         updated = updated.map((a) => (a.id === id ? { ...a, isDefault: true } : { ...a, isDefault: false }));
       }
-      try {
-        localStorage.setItem('ceylon_crunch_saved_addresses', JSON.stringify(updated));
-      } catch {}
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_saved_addresses_${customerId}`, JSON.stringify(updated));
+        } catch {}
+      }
       return updated;
     });
+
+    if (isSupabaseConfigured && customerId) {
+      updateCustomerAddress(id, {
+        label: addressData.label,
+        recipient_name: addressData.recipientName,
+        phone: addressData.phone,
+        street: addressData.street,
+        landmark: addressData.landmark,
+        city: addressData.city,
+        district: addressData.district,
+        postal_code: addressData.postalCode,
+        is_default: addressData.isDefault,
+      }).catch(console.warn);
+    }
   };
 
   const deleteSavedAddress = (id: string) => {
@@ -1750,21 +2164,33 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (remaining.length > 0 && !remaining.some((a) => a.isDefault)) {
         remaining[0].isDefault = true;
       }
-      try {
-        localStorage.setItem('ceylon_crunch_saved_addresses', JSON.stringify(remaining));
-      } catch {}
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_saved_addresses_${customerId}`, JSON.stringify(remaining));
+        } catch {}
+      }
       return remaining;
     });
+
+    if (isSupabaseConfigured && customerId) {
+      deleteCustomerAddress(id).catch(console.warn);
+    }
   };
 
   const setDefaultAddress = (id: string) => {
     setSavedAddresses((prev) => {
       const updated = prev.map((a) => ({ ...a, isDefault: a.id === id }));
-      try {
-        localStorage.setItem('ceylon_crunch_saved_addresses', JSON.stringify(updated));
-      } catch {}
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_saved_addresses_${customerId}`, JSON.stringify(updated));
+        } catch {}
+      }
       return updated;
     });
+
+    if (isSupabaseConfigured && customerId) {
+      updateCustomerAddress(id, { is_default: true }).catch(console.warn);
+    }
   };
 
   // Wishlist methods
@@ -1772,9 +2198,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setWishlist((prev) => {
       const exists = prev.includes(productId);
       const next = exists ? prev.filter((id) => id !== productId) : [...prev, productId];
-      try {
-        localStorage.setItem('ceylon_crunch_wishlist', JSON.stringify(next));
-      } catch {}
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_wishlist_${customerId}`, JSON.stringify(next));
+        } catch {}
+        if (isSupabaseConfigured) {
+          if (exists) {
+            removeCustomerWishlistItem(productId).catch(console.warn);
+          } else {
+            addCustomerWishlistItem(productId).catch(console.warn);
+          }
+        }
+      }
       return next;
     });
   };
@@ -1784,22 +2219,42 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const clearWishlist = () => {
+    const oldWishlist = [...wishlist];
     setWishlist([]);
-    try {
-      localStorage.removeItem('ceylon_crunch_wishlist');
-    } catch {}
+    if (customerId) {
+      try {
+        localStorage.removeItem(`ceylon_crunch_wishlist_${customerId}`);
+      } catch {}
+      if (isSupabaseConfigured) {
+        for (const pid of oldWishlist) {
+          removeCustomerWishlistItem(pid).catch(console.warn);
+        }
+      }
+    }
   };
 
   // Link Order to Profile
   const linkOrderToProfile = (order: Order) => {
+    const linkedOrder: Order = {
+      ...order,
+      userId: customerId || order.userId || undefined,
+    };
     setOrders((prev) => {
-      if (prev.some((o) => o.id === order.id)) return prev;
-      const updated = [order, ...prev];
-      try {
-        localStorage.setItem('ceylon_crunch_orders', JSON.stringify(updated));
-      } catch {}
+      if (prev.some((o) => o.id === order.id)) {
+        return prev.map((o) => (o.id === order.id ? { ...o, userId: customerId || o.userId } : o));
+      }
+      const updated = [linkedOrder, ...prev];
+      if (customerId) {
+        try {
+          localStorage.setItem(`ceylon_crunch_orders_${customerId}`, JSON.stringify(updated));
+        } catch {}
+      }
       return updated;
     });
+
+    if (isSupabaseConfigured && customerId && order.customer?.phone) {
+      linkCustomerOrderRpc(order.id, order.customer.phone).catch(console.warn);
+    }
   };
 
   return (
@@ -1853,6 +2308,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         toast,
         showToast,
         hideToast,
+        customerId,
         customerEmail,
         isCustomerLoggedIn: Boolean(customerEmail),
         loginCustomer,
@@ -1860,6 +2316,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         logoutCustomer,
         createProduct,
         updateProductDetails,
+        toggleProductVisibility,
         deleteProduct,
         subscribers,
         refreshSubscribers,

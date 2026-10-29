@@ -51,6 +51,7 @@ export interface DbProduct {
   shelf_life: string;
   allergen_notice?: string | null;
   is_featured: boolean;
+  is_active?: boolean;
   created_at?: string;
   variants?: DbVariant[];
 }
@@ -66,6 +67,7 @@ export interface DbVariant {
 
 export interface DbOrder {
   id: string;
+  user_id?: string | null;
   customer_name: string;
   customer_phone: string;
   customer_email?: string | null;
@@ -145,6 +147,36 @@ export interface PlaceOrderPayload {
   order_notes?: string | null;
   gift_note?: string | null;
   idempotency_key?: string | null;
+  user_id?: string | null;
+}
+
+export interface DbCustomerAddress {
+  id: string;
+  user_id?: string;
+  label: string;
+  recipient_name: string;
+  phone: string;
+  street: string;
+  landmark?: string | null;
+  city: string;
+  district: string;
+  postal_code?: string | null;
+  is_default: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface DbCustomerProfile {
+  user_id: string;
+  name?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  city?: string | null;
+  district?: string | null;
+  dietary_preferences?: string[] | null;
+  loyalty_tier?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface PlaceOrderResult {
@@ -209,16 +241,22 @@ export interface DbOrderWithItems extends DbOrder {
 
 /**
  * Fetch all products with their nested variants from Supabase
+ * By default includes all products so that the admin can manage visibility
  */
-export async function getProductsFromSupabase(): Promise<DbProduct[] | null> {
+export async function getProductsFromSupabase(includeInactive = true): Promise<DbProduct[] | null> {
   if (!supabase) return null;
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('products')
       .select('*, variants:product_variants(*)')
-      .eq('is_active', true)
       .order('display_order', { ascending: true })
       .order('name', { ascending: true });
+
+    if (!includeInactive) {
+      query = query.eq('is_active', true);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.warn('Supabase getProducts error:', error.message);
@@ -461,7 +499,7 @@ export async function placeOrderRpc(
   }
 
   try {
-    const { data, error } = await supabase.rpc('place_order', {
+    const rpcParams: Record<string, any> = {
       p_customer_name: payload.customer_name,
       p_customer_phone: payload.customer_phone,
       p_shipping_street: payload.shipping_street,
@@ -475,7 +513,12 @@ export async function placeOrderRpc(
       p_order_notes: payload.order_notes || null,
       p_gift_note: payload.gift_note || null,
       p_idempotency_key: payload.idempotency_key || null,
-    });
+    };
+    if (payload.user_id) {
+      rpcParams.p_user_id = payload.user_id;
+    }
+
+    const { data, error } = await supabase.rpc('place_order', rpcParams);
 
     if (error) {
       return { success: false, error: error.message };
@@ -797,6 +840,7 @@ export async function adminUpdateProductDetails(
     ingredients?: string;
     is_featured?: boolean;
     images?: string[];
+    is_active?: boolean;
   }
 ): Promise<{ success: boolean; error?: string }> {
   if (!supabase) return { success: false, error: 'Database is not connected.' };
@@ -814,6 +858,7 @@ export async function adminUpdateProductDetails(
     if (updates.ingredients !== undefined) payload.ingredients = updates.ingredients.trim();
     if (updates.is_featured !== undefined) payload.is_featured = updates.is_featured;
     if (updates.images !== undefined) payload.images = updates.images;
+    if (updates.is_active !== undefined) payload.is_active = updates.is_active;
 
     const { error } = await supabase
       .from('products')
@@ -826,6 +871,29 @@ export async function adminUpdateProductDetails(
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Failed to update product details.' };
+  }
+}
+
+/**
+ * Admin: Toggle product active / hidden visibility in Supabase
+ */
+export async function adminToggleProductActive(
+  productId: string,
+  isActive: boolean
+): Promise<{ success: boolean; error?: string }> {
+  if (!supabase) return { success: false, error: 'Database is not connected.' };
+  try {
+    const { error } = await supabase
+      .from('products')
+      .update({ is_active: isActive, updated_at: new Date().toISOString() })
+      .eq('id', productId);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to toggle product visibility.' };
   }
 }
 
@@ -928,6 +996,316 @@ export async function adminUploadBannerImage(
     return { success: true, url: publicData?.publicUrl };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Banner upload failed.' };
+  }
+}
+
+// ==========================================
+// AUTHENTICATED CUSTOMER DATA SERVICE HELPERS
+// ==========================================
+
+/**
+ * Customer: Fetch orders belonging exclusively to the authenticated customer
+ */
+export async function fetchCustomerOrders(userId?: string): Promise<DbOrderWithItems[] | null> {
+  if (!supabase) return null;
+  try {
+    let effectiveUid = userId;
+    if (!effectiveUid) {
+      const { data: { user } } = await supabase.auth.getUser();
+      effectiveUid = user?.id;
+    }
+    if (!effectiveUid) return null;
+
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*, items:order_items(*)')
+      .eq('user_id', effectiveUid)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.warn('Fetch customer orders error:', error.message);
+      return null;
+    }
+    return data as DbOrderWithItems[];
+  } catch (err) {
+    console.warn('Fetch customer orders exception:', err);
+    return null;
+  }
+}
+
+/**
+ * Customer: Fetch saved addresses belonging exclusively to the authenticated customer
+ */
+export async function fetchCustomerAddresses(userId?: string): Promise<DbCustomerAddress[] | null> {
+  if (!supabase) return null;
+  try {
+    let effectiveUid = userId;
+    if (!effectiveUid) {
+      const { data: { user } } = await supabase.auth.getUser();
+      effectiveUid = user?.id;
+    }
+    if (!effectiveUid) return null;
+
+    const { data, error } = await supabase
+      .from('customer_addresses')
+      .select('*')
+      .eq('user_id', effectiveUid)
+      .order('is_default', { ascending: false })
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.warn('Fetch customer addresses error:', error.message);
+      return null;
+    }
+    return data as DbCustomerAddress[];
+  } catch (err) {
+    console.warn('Fetch customer addresses exception:', err);
+    return null;
+  }
+}
+
+/**
+ * Customer: Add a new saved address in Supabase
+ */
+export async function saveCustomerAddress(
+  address: Omit<DbCustomerAddress, 'id' | 'created_at' | 'updated_at'>
+): Promise<{ success: boolean; data?: DbCustomerAddress; error?: string }> {
+  if (!supabase) return { success: false, error: 'Database offline' };
+  try {
+    let uid = address.user_id;
+    if (!uid) {
+      const { data: { user } } = await supabase.auth.getUser();
+      uid = user?.id;
+    }
+    if (!uid) return { success: false, error: 'User authentication required' };
+
+    // If marked default, unset default on other addresses for this user
+    if (address.is_default) {
+      await supabase
+        .from('customer_addresses')
+        .update({ is_default: false })
+        .eq('user_id', uid);
+    }
+
+    const { data, error } = await supabase
+      .from('customer_addresses')
+      .insert([{ ...address, user_id: uid }])
+      .select()
+      .single();
+
+    if (error) return { success: false, error: error.message };
+    return { success: true, data: data as DbCustomerAddress };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to save address' };
+  }
+}
+
+/**
+ * Customer: Update an existing saved address in Supabase
+ */
+export async function updateCustomerAddress(
+  id: string,
+  updates: Partial<DbCustomerAddress>
+): Promise<{ success: boolean; error?: string }> {
+  if (!supabase) return { success: false, error: 'Database offline' };
+  try {
+    if (updates.is_default) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        await supabase
+          .from('customer_addresses')
+          .update({ is_default: false })
+          .eq('user_id', user.id);
+      }
+    }
+
+    const { error } = await supabase
+      .from('customer_addresses')
+      .update({ ...updates, updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to update address' };
+  }
+}
+
+/**
+ * Customer: Delete a saved address in Supabase
+ */
+export async function deleteCustomerAddress(id: string): Promise<{ success: boolean; error?: string }> {
+  if (!supabase) return { success: false, error: 'Database offline' };
+  try {
+    const { error } = await supabase
+      .from('customer_addresses')
+      .delete()
+      .eq('id', id);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to delete address' };
+  }
+}
+
+/**
+ * Customer: Fetch wishlist product IDs belonging exclusively to the authenticated customer
+ */
+export async function fetchCustomerWishlist(userId?: string): Promise<string[] | null> {
+  if (!supabase) return null;
+  try {
+    let effectiveUid = userId;
+    if (!effectiveUid) {
+      const { data: { user } } = await supabase.auth.getUser();
+      effectiveUid = user?.id;
+    }
+    if (!effectiveUid) return null;
+
+    const { data, error } = await supabase
+      .from('customer_wishlist')
+      .select('product_id')
+      .eq('user_id', effectiveUid);
+
+    if (error) {
+      console.warn('Fetch wishlist error:', error.message);
+      return null;
+    }
+    return (data || []).map((row: any) => row.product_id);
+  } catch (err) {
+    console.warn('Fetch wishlist exception:', err);
+    return null;
+  }
+}
+
+/**
+ * Customer: Add item to wishlist in Supabase (safe check avoids conflict RLS issues)
+ */
+export async function addCustomerWishlistItem(productId: string): Promise<boolean> {
+  if (!supabase) return false;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+
+    // Verify if already present
+    const { data: existing } = await supabase
+      .from('customer_wishlist')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('product_id', productId)
+      .maybeSingle();
+
+    if (existing) return true;
+
+    const { error } = await supabase
+      .from('customer_wishlist')
+      .insert([{ user_id: user.id, product_id: productId }]);
+
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Customer: Remove item from wishlist in Supabase
+ */
+export async function removeCustomerWishlistItem(productId: string): Promise<boolean> {
+  if (!supabase) return false;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+    const { error } = await supabase
+      .from('customer_wishlist')
+      .delete()
+      .eq('user_id', user.id)
+      .eq('product_id', productId);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Customer: Link a guest order to the authenticated customer account in Supabase
+ */
+export async function linkCustomerOrderRpc(
+  orderId: string,
+  phone: string
+): Promise<{ success: boolean; error?: string }> {
+  if (!supabase) return { success: false, error: 'Database offline' };
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { success: false, error: 'Authentication required' };
+
+    // 1. Try backend RPC
+    const { data: rpcData, error: rpcError } = await supabase.rpc('link_customer_order', {
+      p_order_id: orderId.trim(),
+      p_phone: phone.trim(),
+    });
+
+    if (!rpcError && rpcData?.success) {
+      return { success: true };
+    }
+
+    // 2. Direct secure fallback if order verified via trackOrderRpc
+    const trackRes = await trackOrderRpc(orderId.trim(), phone.trim());
+    if (!trackRes.found || !trackRes.order) {
+      return { success: false, error: 'No matching order found for this Order ID and phone number.' };
+    }
+
+    const { error: updErr } = await supabase
+      .from('orders')
+      .update({ user_id: user.id, updated_at: new Date().toISOString() })
+      .eq('id', trackRes.order.id);
+
+    return { success: !updErr };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to link order' };
+  }
+}
+
+/**
+ * Customer: Fetch customer profile from Supabase
+ */
+export async function fetchCustomerProfile(): Promise<DbCustomerProfile | null> {
+  if (!supabase) return null;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
+    const { data, error } = await supabase
+      .from('customer_profiles')
+      .select('*')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    return data as DbCustomerProfile;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Customer: Upsert customer profile in Supabase
+ */
+export async function upsertCustomerProfile(
+  profile: Partial<DbCustomerProfile>
+): Promise<boolean> {
+  if (!supabase) return false;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+    const { error } = await supabase
+      .from('customer_profiles')
+      .upsert({
+        user_id: user.id,
+        ...profile,
+        updated_at: new Date().toISOString(),
+      });
+    return !error;
+  } catch {
+    return false;
   }
 }
 
